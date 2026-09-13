@@ -49,10 +49,19 @@ COPY --from=build --chown=wallet:wallet /out/application/            ./
 USER wallet:wallet
 
 ENV PORT=8080
-# MaxRAMPercentage, not -Xmx: the JVM must size its heap from the *container's*
-# cgroup limit, which differs between a laptop and a 512MB free-tier instance.
-# Without this the JVM reads the host's memory and gets OOM-killed on deploy.
-ENV JAVA_OPTS="-XX:MaxRAMPercentage=70 -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -Xss512k"
+# MaxRAMPercentage rather than -Xmx: the JVM must size its heap from the
+# CONTAINER's cgroup limit, which differs between a laptop and a 512MB free-tier
+# instance. Without it the JVM reads the host's memory and gets OOM-killed.
+#
+# SerialGC is right for a single-core instance with a small heap -- a concurrent
+# collector's own threads would contend with the request threads for the one CPU.
+#
+# Deliberately NOT -XX:TieredStopAtLevel=1. That caps compilation at C1 and does
+# shave a second off boot, but it also means the hot path never reaches C2, which
+# is exactly backwards for a service whose interesting behaviour is a sustained
+# burst. Paying for a faster start with a permanently slower steady state is the
+# wrong trade here.
+ENV JAVA_OPTS="-XX:MaxRAMPercentage=70 -XX:+UseSerialGC -Xss512k"
 
 EXPOSE 8080
 

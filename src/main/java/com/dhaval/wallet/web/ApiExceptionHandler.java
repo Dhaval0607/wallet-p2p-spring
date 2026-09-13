@@ -8,8 +8,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.ErrorResponseException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.Map;
 
@@ -79,6 +81,31 @@ public class ApiExceptionHandler {
             detail = detail.substring(0, 300);
         }
         return ErrorBody.of(400, "invalid_body", "could not parse request: " + detail);
+    }
+
+    /**
+     * A request for a path that does not exist is a 404, not a 500.
+     *
+     * <p>Without this, the catch-all below turned every missing static resource
+     * into a server error -- including the {@code favicon.ico} that every browser
+     * requests unprompted. That is not a cosmetic mislabel: it inflates the error
+     * rate that is supposed to mean something, and it would fail this project's
+     * own "zero 5xx" CI assertion the moment anyone opened the service in a tab.
+     */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<ErrorBody> handleNoResource(NoResourceFoundException e) {
+        return ErrorBody.of(404, "not_found", "no such path: " + e.getResourcePath());
+    }
+
+    /** Anything that already carries its own status keeps it. */
+    @ExceptionHandler(ErrorResponseException.class)
+    public ResponseEntity<ErrorBody> handleErrorResponse(ErrorResponseException e) {
+        int status = e.getStatusCode().value();
+        if (status >= 500) {
+            log.atError().addKeyValue("event", "unhandled_error").setCause(e).log("server error");
+        }
+        return ErrorBody.of(status, status >= 500 ? "internal_error" : "request_error",
+                e.getMessage());
     }
 
     @ExceptionHandler(Exception.class)
