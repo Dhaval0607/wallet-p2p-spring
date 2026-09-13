@@ -1,0 +1,21 @@
+target/
+!.mvn/wrapper/maven-wrapper.jar
+.mvn/timing.properties
+
+# local env
+.env
+.env.*
+!.env.example
+
+# editors
+.idea/
+.vscode/
+*.iml
+*.iws
+
+# os
+.DS_Store
+
+# not ours to publish
+01-wallet-transfer-RUBRIC.md
+R3-PREP.md
