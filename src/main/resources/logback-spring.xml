@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+  <!--
+    The default console appender is deliberately not included. Every record goes
+    through JsonLogAppender instead, which writes one line of JSON to stdout for
+    the host's log drain AND into the in-memory ring that backs the public /logs
+    stream. Two destinations, one serialization.
+  -->
+  <appender name="JSON" class="com.dhaval.wallet.obs.JsonLogAppender"/>
+
+  <!-- Spring's own startup chatter is not a domain event; keep the stream readable. -->
+  <logger name="org.springframework" level="WARN"/>
+  <logger name="org.apache.catalina" level="WARN"/>
+  <logger name="org.apache.coyote" level="WARN"/>
+  <logger name="com.zaxxer.hikari" level="WARN"/>
+
+  <root level="INFO">
+    <appender-ref ref="JSON"/>
+  </root>
+</configuration>
