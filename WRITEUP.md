@@ -3,6 +3,9 @@
 Java 21 · Spring Boot 3.5 · Postgres 16. One page on what this is, why it is
 built the way it is, and what I gave up.
 
+**Live:** https://wallet-p2p-spring.onrender.com | **Logs:** https://wallet-p2p-spring.onrender.com/logs | **Invariants:** https://wallet-p2p-spring.onrender.com/invariants
+**Repo:** https://github.com/Dhaval0607/wallet-p2p-spring
+
 ---
 
 ## 1. Data model
