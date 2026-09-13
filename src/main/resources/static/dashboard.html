@@ -118,28 +118,48 @@
       card('get-or-create reuse', fmt(sum(m.wallet_wallets_reused_total))) +
       card('db tx retries', fmt(sum(m.wallet_db_retries_total)), sum(m.wallet_db_retries_total) ? 'warn' : 'ok');
 
-    var reqs = m.http_requests_total || [], total = sum(reqs);
-    var errs = sum(reqs.filter(function (s) { return s.labels.status && s.labels.status[0] === '5'; }));
-    var all = (m.http_request_duration_seconds_bucket || []).map(function (s) { return { le: parseFloat(s.labels.le), count: s.value }; });
+    // Micrometer names the server-request timer http_server_requests_seconds and
+    // tags the route `uri` (already templated, so /wallets/{id} rather than a
+    // thousand distinct ids). Outcome is a tag too, so 5xx is a filter rather
+    // than a status-code prefix test.
+    var reqs = m.http_server_requests_seconds_count || [], total = sum(reqs);
+    var errs = sum(reqs.filter(function (s) { return s.labels.outcome === 'SERVER_ERROR'; }));
     var byLe = {};
-    all.forEach(function (b) { byLe[b.le] = (byLe[b.le] || 0) + b.count; });
+    (m.http_server_requests_seconds_bucket || []).forEach(function (b) {
+      var le = parseFloat(b.labels.le);
+      byLe[le] = (byLe[le] || 0) + b.value;
+    });
     var global = Object.keys(byLe).map(function (le) { return { le: parseFloat(le), count: byLe[le] }; });
 
     document.getElementById('http').innerHTML =
       card('requests total', fmt(total)) +
-      card('in flight', fmt(sum(m.http_requests_in_flight))) +
+      card('in flight', fmt(sum(m.http_server_requests_active_seconds_gcount))) +
       card('5xx', fmt(errs), errs ? 'bad' : 'ok') +
       card('error rate', total ? (100 * errs / total).toFixed(2) + ' %' : '0.00 %', errs ? 'bad' : 'ok') +
       card('p99 latency (all)', ms(quantile(global, 0.99))) +
-      card('db conns in use', fmt(sum(m.wallet_db_pool_acquired_conns)) + ' / ' + fmt(sum(m.wallet_db_pool_total_conns)));
+      card('db conns in use', fmt(sum(m.hikaricp_connections_active)) + ' / ' + fmt(sum(m.hikaricp_connections)));
 
+    // One route's buckets are split further by status and outcome, so the same
+    // `le` appears several times per route. Sum them before computing quantiles,
+    // or the bucket series is non-monotonic and every percentile is nonsense.
+    var routeLe = {};
+    (m.http_server_requests_seconds_bucket || []).forEach(function (s) {
+      var k = s.labels.method + ' ' + s.labels.uri;
+      var le = parseFloat(s.labels.le);
+      (routeLe[k] = routeLe[k] || {});
+      routeLe[k][le] = (routeLe[k][le] || 0) + s.value;
+    });
     var routes = {};
-    (m.http_request_duration_seconds_bucket || []).forEach(function (s) {
-      var k = s.labels.method + ' ' + s.labels.route;
-      (routes[k] = routes[k] || []).push({ le: parseFloat(s.labels.le), count: s.value });
+    Object.keys(routeLe).forEach(function (k) {
+      routes[k] = Object.keys(routeLe[k]).map(function (le) {
+        return { le: parseFloat(le), count: routeLe[k][le] };
+      });
     });
     var counts = {};
-    (m.http_request_duration_seconds_count || []).forEach(function (s) { counts[s.labels.method + ' ' + s.labels.route] = s.value; });
+    (m.http_server_requests_seconds_count || []).forEach(function (s) {
+      var k = s.labels.method + ' ' + s.labels.uri;
+      counts[k] = (counts[k] || 0) + s.value;
+    });
 
     document.querySelector('#lat tbody').innerHTML = Object.keys(routes).sort().map(function (k) {
       var b = routes[k];
