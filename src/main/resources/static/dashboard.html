@@ -124,8 +124,13 @@
     // than a status-code prefix test.
     var reqs = m.http_server_requests_seconds_count || [], total = sum(reqs);
     var errs = sum(reqs.filter(function (s) { return s.labels.outcome === 'SERVER_ERROR'; }));
+    // /logs/stream is a long-lived SSE tail measured in minutes. Leaving it in
+    // the global aggregate makes the headline p99 a statement about how long
+    // someone kept a log viewer open, not about how fast money moves.
+    var STREAMING = { '/logs/stream': 1 };
     var byLe = {};
     (m.http_server_requests_seconds_bucket || []).forEach(function (b) {
+      if (STREAMING[b.labels.uri]) return;
       var le = parseFloat(b.labels.le);
       byLe[le] = (byLe[le] || 0) + b.value;
     });
@@ -136,7 +141,7 @@
       card('in flight', fmt(sum(m.http_server_requests_active_seconds_gcount))) +
       card('5xx', fmt(errs), errs ? 'bad' : 'ok') +
       card('error rate', total ? (100 * errs / total).toFixed(2) + ' %' : '0.00 %', errs ? 'bad' : 'ok') +
-      card('p99 latency (all)', ms(quantile(global, 0.99))) +
+      card('p99 latency (excl. stream)', ms(quantile(global, 0.99))) +
       card('db conns in use', fmt(sum(m.hikaricp_connections_active)) + ' / ' + fmt(sum(m.hikaricp_connections)));
 
     // One route's buckets are split further by status and outcome, so the same
