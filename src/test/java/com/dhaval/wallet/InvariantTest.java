@@ -15,6 +15,7 @@ import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
@@ -33,6 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 /**
  * Integration tests, on purpose.
@@ -62,6 +64,9 @@ class InvariantTest {
 
     @Autowired
     TransferService transfers;
+
+    @Autowired
+    JdbcTemplate jdbc;
 
     // ------------------------------------------------------------------
     // helpers
@@ -357,5 +362,55 @@ class InvariantTest {
         assertTrue(DatabaseUrl.translate("jdbc:postgresql://localhost/x").isEmpty(),
                 "an existing JDBC url must pass through untouched");
         assertTrue(DatabaseUrl.translate(null).isEmpty());
+    }
+
+    // ------------------------------------------------------------------
+    // schema isolation
+    // ------------------------------------------------------------------
+
+    /** The schema an unqualified table name resolves to on a pooled connection. */
+    private String schemaOf(String table) {
+        return jdbc.queryForObject(
+                "SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+                        + " WHERE c.oid = to_regclass(?)",
+                String.class, table);
+    }
+
+    @Test
+    void everyTableLivesInTheDedicatedWalletSchema() {
+        for (String table : List.of("users", "wallets", "transfers", "ledger_entries", "mints")) {
+            assertEquals("wallet", schemaOf(table),
+                    table + " must resolve inside the `wallet` schema, not `public`");
+        }
+    }
+
+    /**
+     * Regression. On the free tier one account gets one database, so this service
+     * shares a Postgres instance with others and keeps its tables in a dedicated
+     * {@code wallet} schema. That isolation is easy to lose silently: CREATE TABLE
+     * IF NOT EXISTS skips creation when a table of that name is <em>visible</em> on
+     * the search_path, not when it is absent from the target schema. With
+     * {@code public} on the path during DDL, a same-named table belonging to another
+     * service makes every CREATE no-op, and every query afterwards reads and writes
+     * that other service's rows while looking entirely healthy.
+     *
+     * <p>schema.sql narrows search_path to {@code wallet} alone for exactly this
+     * reason. A decoy in {@code public} must not capture anything.
+     */
+    @Test
+    void aDecoyTableInPublicDoesNotShadowTheWalletSchema() {
+        Boolean preexisting = jdbc.queryForObject(
+                "SELECT to_regclass('public.wallets') IS NOT NULL", Boolean.class);
+        assumeFalse(Boolean.TRUE.equals(preexisting),
+                "public.wallets already exists here - skipping rather than touching "
+                        + "a table this test does not own");
+
+        jdbc.execute("CREATE TABLE public.wallets (id uuid PRIMARY KEY)");
+        try {
+            assertEquals("wallet", schemaOf("wallets"),
+                    "a same-named table in `public` must not shadow wallet.wallets");
+        } finally {
+            jdbc.execute("DROP TABLE IF EXISTS public.wallets");
+        }
     }
 }

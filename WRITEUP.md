@@ -52,6 +52,38 @@ to be right, and its first-level cache and flush ordering would make the lock
 sequence something I infer rather than something I wrote. `JdbcTemplate` is the
 whole persistence layer: the SQL in `TransferService` is the SQL that executes.
 
+### A dedicated schema, and the way it silently wasn't one
+
+The free tier gives one account exactly one database, so this service shares a
+Postgres instance. Its tables therefore live in a dedicated `wallet` schema, and
+Hikari pins `search_path` to `wallet, public` on every pooled connection.
+
+That was true of the DDL too — `schema.sql` opened with `SET search_path TO
+wallet, public` — and it made the isolation a no-op. `CREATE TABLE IF NOT EXISTS`
+skips creation when a table of that name is **visible on the search_path**, not
+when it is absent from the target schema. Another service already had a `wallets`
+in `public`; with `public` on the path, every `CREATE` below matched it and did
+nothing, `wallet` stayed empty, and every query afterwards fell through to
+`public` and read and wrote the *other* service's rows.
+
+Nothing looked wrong. The app booted, `/healthz` was green, `/invariants`
+returned `all_invariants_hold: true` — because the invariants genuinely did hold,
+just over somebody else's table. What exposed it was a differential test rather
+than an inspection: create one wallet against this service, then read the other
+service's wallet count and watch it move too.
+
+The fix is one line — narrow the DDL to `SET search_path TO wallet` alone, so the
+`IF NOT EXISTS` checks mean what they appear to mean — and the script restores the
+runtime path at the end, since `connection-init-sql` runs once per physical
+connection rather than per borrow. Two tests hold it down: one asserts all five
+tables resolve inside `wallet`, and one plants a decoy `public.wallets` and
+asserts it captures nothing.
+
+The general lesson is the one this exercise is about. A green health check is
+evidence that a service is running, not that it is operating on the data it
+thinks it is. Isolation you have configured but never observed failing is a
+claim, not a property.
+
 ---
 
 ## 2. The simplest-correct mechanism

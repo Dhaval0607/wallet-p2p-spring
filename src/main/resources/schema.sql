@@ -6,7 +6,18 @@
 -- exactly one database. Hikari sets search_path on every pooled connection
 -- (see application.yml), so nothing below needs to be schema-qualified.
 CREATE SCHEMA IF NOT EXISTS wallet;
-SET search_path TO wallet, public;
+
+-- `wallet` ALONE here, deliberately -- not `wallet, public` as at runtime.
+--
+-- CREATE TABLE IF NOT EXISTS skips creation when a table of that name is
+-- *visible* on the search_path, not when it is absent from the target schema.
+-- With `public` on the path, same-named tables left in `public` by another
+-- service sharing this instance are visible, so every CREATE below no-ops and
+-- every query then silently resolves to that other service's tables -- the
+-- exact isolation this schema exists to provide, quietly not happening.
+-- Dropping `public` for the DDL makes these IF NOT EXISTS checks mean what
+-- they look like they mean.
+SET search_path TO wallet;
 
 -- Invariant enforcement lives here first, in the database, because the database
 -- is the only thing every application replica agrees on. The Java code is a client
@@ -110,3 +121,9 @@ CREATE TABLE IF NOT EXISTS mints (
     CONSTRAINT mints_idem_key        UNIQUE (idempotency_key),
     CONSTRAINT mints_amount_positive CHECK (amount_paise > 0)
 );
+
+-- Hand this connection back to the pool on the same search_path every other
+-- pooled connection carries. Hikari's connection-init-sql runs once per
+-- physical connection, not per borrow, so the narrowed DDL path above would
+-- otherwise outlive this script on whichever connection happened to run it.
+SET search_path TO wallet, public;
