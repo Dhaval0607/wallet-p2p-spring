@@ -1,7 +1,15 @@
 -- Wallet & P2P transfer schema.
 --
+-- Everything lives in a dedicated `wallet` schema rather than `public`. That
+-- keeps this service's tables isolated even when it shares a Postgres instance
+-- with something else -- which it does on the free tier, where one account gets
+-- exactly one database. Hikari sets search_path on every pooled connection
+-- (see application.yml), so nothing below needs to be schema-qualified.
+CREATE SCHEMA IF NOT EXISTS wallet;
+SET search_path TO wallet, public;
+
 -- Invariant enforcement lives here first, in the database, because the database
--- is the only thing every application replica agrees on. The Go code is a client
+-- is the only thing every application replica agrees on. The Java code is a client
 -- of these rules, not the owner of them.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;

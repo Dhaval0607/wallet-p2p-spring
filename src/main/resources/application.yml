@@ -15,6 +15,10 @@ spring:
       # Free-tier Postgres cold-starts; fail slowly at boot rather than crash-loop
       # before the database has woken up.
       initialization-fail-timeout: 60000
+      # Pin every pooled connection to this service's own schema. Postgres allows
+      # a search_path entry that does not exist yet, so this is safe on the very
+      # first connection, before schema.sql has run.
+      connection-init-sql: SET search_path TO wallet, public
 
   sql:
     init:
