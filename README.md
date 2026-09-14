@@ -23,18 +23,18 @@ Money is integer paise everywhere. There is no float in this program.
 Reproduce every invariant against the live service in one command:
 
 ```bash
-ADMIN_TOKEN=<token supplied with the submission> \
-  ./scripts/burst.sh https://wallet-p2p-spring.onrender.com
+./scripts/burst.sh https://wallet-p2p-spring.onrender.com
 ```
 
-That token gates `POST /admin/mint`, which is test funding only: it mints play
-money into a single wallet and cannot move money between wallets, so it cannot
-affect any invariant this service claims. It is kept out of the repo rather than
-published, since it is a live credential on a public instance.
+**No token, no signup, no setup.** The script funds its own wallets through
+`POST /wallets/{id}/fund`, a public faucet that tops up a wallet your own bearer
+token owns — and a bearer token here is any string you invent. Bounded at ₹10,000
+per call and ₹1,00,000 per wallet, and the money lands in `mints` rather than
+moving between wallets, so it cannot affect any invariant this service claims.
 
-Everything else is open without it — `/invariants`, `/metrics`, `/logs` and the
-dashboard need no auth, and `make up && make burst` reproduces all three gates
-locally with no token at all.
+`POST /admin/mint` still exists for unbounded funding and still needs
+`ADMIN_TOKEN`, but nothing you need to reproduce requires it. `/invariants`,
+`/metrics`, `/logs` and the dashboard need no auth either.
 
 > The free instance sleeps after ~15 minutes idle and takes ~40-60s to wake (a
 > JVM cold start is slower than a native binary's). The burst script polls
@@ -137,7 +137,8 @@ from `$A` is sent with alice's token. Anything else is `403`.
 | `GET` | `/wallets/{id}` | current balance |
 | `POST` | `/transfers` | `{from, to, amount_paise, idempotency_key}` |
 | `GET` | `/transfers/{id}` | transfer status |
-| `POST` | `/admin/mint` | test funding, admin token. **Not** a transfer — see the write-up |
+| `POST` | `/wallets/{id}/fund` | public faucet: fund your own wallet, no admin token. **Not** a transfer |
+| `POST` | `/admin/mint` | unbounded test funding, admin token. **Not** a transfer — see the write-up |
 | `GET` | `/invariants` | live audit, recomputed from base tables. `500` if broken |
 | `GET` | `/metrics` | Prometheus |
 | `GET` | `/dashboard` | live metrics dashboard |
@@ -166,6 +167,8 @@ you get `409`.
 | `409` | idempotency key reused with a different body |
 | `422` | validation failed; the key was **not** consumed, so it is safe to reuse |
 | `403` | you don't own the source wallet |
+| `429` | the faucet's per-call or per-wallet ceiling |
+| `400` | `amount_paise` was not an integer — a decimal is refused, never truncated |
 
 A decline is a successfully recorded business outcome, not an HTTP failure. It
 returns `201` with `"status":"declined"` so that retrying it returns the identical

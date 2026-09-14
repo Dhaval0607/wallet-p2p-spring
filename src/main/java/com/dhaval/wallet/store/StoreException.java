@@ -8,6 +8,7 @@ public class StoreException extends RuntimeException {
         TRANSFER_NOT_FOUND,
         IDEMPOTENCY_CONFLICT,
         SAME_WALLET,
+        FAUCET_LIMIT,
         INVARIANT_VIOLATION
     }
 
@@ -37,5 +38,9 @@ public class StoreException extends RuntimeException {
 
     public static StoreException sameWallet() {
         return new StoreException(Kind.SAME_WALLET, "from and to must differ");
+    }
+
+    public static StoreException faucetLimit(String message) {
+        return new StoreException(Kind.FAUCET_LIMIT, message);
     }
 }

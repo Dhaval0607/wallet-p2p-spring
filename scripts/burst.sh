@@ -14,6 +14,8 @@ set -uo pipefail
 
 BASE_URL="${1:-${BASE_URL:-http://localhost:8080}}"
 BASE_URL="${BASE_URL%/}"
+# Only needed for POST /admin/mint. The gates below fund through the public
+# faucet instead, so no token is required to reproduce any of them.
 ADMIN_TOKEN="${ADMIN_TOKEN:-dev-admin-token}"
 
 # Tunables -- raise these to push harder.
@@ -174,22 +176,22 @@ while [ "$i" -le "$N_WALLETS" ]; do
   WID="$(api POST /wallets "$TOK" | jget id)"
   if [ -z "$WID" ]; then fail "could not create wallet $i"; exit 1; fi
 
-  # Check the mint actually landed. A wrong or missing ADMIN_TOKEN answers 403,
-  # and swallowing that leaves every wallet at zero -- at which point every
-  # transfer below is declined for insufficient funds and the gates "pass"
-  # without ever moving money. A vacuous pass is worse than a failure, so this
-  # stops here and says exactly what is wrong.
-  MINT="$(api POST /admin/mint "$ADMIN_TOKEN" \
-      "{\"wallet_id\":\"$WID\",\"amount_paise\":$SEED_PAISE,\"idempotency_key\":\"$RUN_ID-seed-$i\"}")"
+  # Funded through the public faucet, using the wallet owner's own token, so
+  # this script needs no shared secret to run against the deployed URL.
+  #
+  # Checked rather than discarded: if funding silently fails, every wallet stays
+  # at zero, every transfer below is declined for insufficient funds, and the
+  # gates "pass" without money ever moving. A vacuous pass is worse than a
+  # failure, so this stops here and says what went wrong.
+  MINT="$(api POST "/wallets/$WID/fund" "$TOK" \
+      "{\"amount_paise\":$SEED_PAISE,\"idempotency_key\":\"$RUN_ID-seed-$i\"}")"
   MINTED="$(printf '%s' "$MINT" | jget balance_paise)"
   if [ -z "$MINTED" ] || [ "$MINTED" = "0" ]; then
     fail "could not fund wallet $i -- the server said: $MINT"
     case "$MINT" in
-      *forbidden*|*admin*)
-        info "POST /admin/mint is gated by ADMIN_TOKEN, and the value in use is"
-        info "'$ADMIN_TOKEN'. Against the deployed instance that token ships with"
-        info "the submission; export it and re-run:"
-        info "    ADMIN_TOKEN=<token> $0 $BASE_URL" ;;
+      *faucet_limit*)
+        info "the faucet is bounded per call and per wallet; lower SEED_PAISE"
+        info "(currently $SEED_PAISE) or use POST /admin/mint with ADMIN_TOKEN." ;;
     esac
     exit 1
   fi
@@ -280,6 +282,32 @@ if [ "$FROM_AFTER2" = "$FROM_AFTER" ]; then
   pass "the 409 moved no money"
 else
   fail "the conflicting request changed the balance: $FROM_AFTER -> $FROM_AFTER2"
+fi
+
+# --------------------------------------------------------------------------
+head_ "Money is integer paise -- a decimal is refused, not rounded"
+# --------------------------------------------------------------------------
+# Asserted over HTTP because this is a property of the deserializer, and the
+# default Jackson behaviour is the dangerous one: it TRUNCATES 12.5 to 12 and
+# moves 12 paise, silently. A service that claims money never touches a float
+# has to prove it at the edge where the float would arrive.
+FLOAT_BEFORE="$(api GET "/wallets/$W1" "$T1" | jget balance_paise)"
+for amount in 12.5 100.00; do
+  CODE="$(curl -sS -o "$WORK/float.json" -w '%{http_code}' -X POST "$BASE_URL/transfers" \
+    -H "Authorization: Bearer $T1" -H 'Content-Type: application/json' \
+    -H "X-Correlation-Id: $RUN_ID-float" \
+    -d "{\"from\":\"$W1\",\"to\":\"$W2\",\"amount_paise\":$amount,\"idempotency_key\":\"$RUN_ID-float-$amount\"}")"
+  if [ "$CODE" = "400" ]; then
+    pass "amount_paise: $amount rejected with 400 (not truncated)"
+  else
+    fail "amount_paise: $amount returned HTTP $CODE, expected 400: $(cat "$WORK/float.json")"
+  fi
+done
+FLOAT_AFTER="$(api GET "/wallets/$W1" "$T1" | jget balance_paise)"
+if [ "$FLOAT_AFTER" = "$FLOAT_BEFORE" ]; then
+  pass "no decimal amount moved any money"
+else
+  fail "a decimal amount moved money: $FLOAT_BEFORE -> $FLOAT_AFTER"
 fi
 
 # ==========================================================================

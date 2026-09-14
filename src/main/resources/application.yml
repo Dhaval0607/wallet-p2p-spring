@@ -20,6 +20,15 @@ spring:
       # first connection, before schema.sql has run.
       connection-init-sql: SET search_path TO wallet, public
 
+  jackson:
+    deserialization:
+      # Money arrives as integer paise or it does not arrive. Jackson's default
+      # is to silently TRUNCATE a decimal into a long -- "amount_paise": 12.5
+      # becomes 12 -- which is precisely the rupees-as-decimal rounding this
+      # service claims to have no place for. Turning the coercion off makes the
+      # deserializer reject it as a 400 instead of quietly inventing a value.
+      accept-float-as-int: false
+
   sql:
     init:
       # One idempotent CREATE-IF-NOT-EXISTS script rather than a migration

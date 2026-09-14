@@ -19,7 +19,9 @@ money entering from outside. Mints are deliberately not transfers: routed throug
 the transfer path, conservation would be unfalsifiable, since the total could
 change and I could always call it a deposit. Apart, it is a checkable equation —
 `SUM(balances) == SUM(mints)` — which `GET /invariants` recomputes from the base
-tables on every call, answering **500** if it fails.
+tables on every call, answering **500** if it fails. Funding is reachable without
+a shared secret: `POST /wallets/{id}/fund` is a bounded public faucet for a wallet
+the caller owns, so anyone can reproduce the gates against the live URL.
 
 **The simplest-correct mechanism.** One `READ COMMITTED` transaction covers the
 key, the debit, the credit and the ledger rows. Claim the idempotency key first
@@ -91,7 +93,15 @@ says it is grading.*
 Five tables. Money is `bigint` paise in the database and `long` paise in Java —
 there is no `double`, no `float` and no `BigDecimal` anywhere on the money path,
 so there is no place for a rounding rule to hide. A body carrying
-`"amount_paise": 12.5` is rejected by the deserializer, not rounded.
+`"amount_paise": 12.5` is rejected by the deserializer with a 400, not rounded.
+
+That last sentence was false for most of this project's life, and I only found out
+by testing it. Jackson's default is `ACCEPT_FLOAT_AS_INT`, which silently
+**truncates** a decimal into a `long` — `12.5` became a 12-paise transfer that
+returned `201 succeeded`. A `long` field looks like it rejects decimals; it does
+not. The fix is one line of config (`accept-float-as-int: false`), and the burst
+script now asserts it over HTTP against the deployed URL, because a property of
+the deserializer is only real at the edge where the float actually arrives.
 
 | table | purpose | the constraint that does the work |
 |---|---|---|
@@ -99,7 +109,7 @@ so there is no place for a rounding rule to hide. A body carrying
 | `wallets` | one balance per user | `UNIQUE (user_id)` · `CHECK (balance_paise >= 0)` |
 | `transfers` | one attempted movement **and** the idempotency record | `UNIQUE (requester_user_id, idempotency_key)` |
 | `ledger_entries` | double-entry audit trail, two rows per success | `SUM(delta_paise)` over the table is always 0 |
-| `mints` | money entering from outside (test funding) | `UNIQUE (idempotency_key)` |
+| `mints` | money entering from outside (test funding, admin or faucet) | `UNIQUE (idempotency_key)` |
 
 Two choices worth calling out.
 

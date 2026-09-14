@@ -122,6 +122,78 @@ public class WalletRepository {
         // idempotency key is not consumed by a request that could never work.
         getWallet(walletId);
 
+        boolean applied = applyMint(walletId, idempotencyKey, amountPaise);
+        return new MintResult(getWallet(walletId), applied);
+    }
+
+    /** The largest single self-service top-up: ₹10,000. */
+    public static final long FAUCET_MAX_PER_CALL_PAISE = 10_000_00L;
+
+    /** The most any one wallet may ever receive from outside: ₹1,00,000. */
+    public static final long FAUCET_MAX_PER_WALLET_PAISE = 1_00_000_00L;
+
+    /**
+     * Self-service test funding, open to any caller for their own wallet.
+     *
+     * <p>Exists so that reproducing the invariants against the deployed URL needs
+     * no shared secret. The admin token that gates {@link #mint} is the right
+     * control for unlimited funding, but it is the wrong thing to put between a
+     * reviewer and the gates they came to run: a token that has to be passed
+     * around out of band is a token that goes missing, and a burst that cannot
+     * fund its wallets does not fail loudly -- every transfer simply declines for
+     * insufficient funds and the gates pass without moving money.
+     *
+     * <p>Public does not mean unbounded. Two ceilings apply, and the wallet row is
+     * locked before the lifetime total is read so two concurrent calls cannot both
+     * see the same total and both pass the check. Money still lands in
+     * {@code mints}, so {@code SUM(balances) == SUM(mints)} continues to hold and
+     * conservation stays exactly as falsifiable as it was.
+     *
+     * <p>Ownership is checked by the caller: you may only fund a wallet your own
+     * bearer token owns.
+     */
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public MintResult fund(String walletId, String idempotencyKey, long amountPaise) {
+        if (!isUuid(walletId)) {
+            throw StoreException.walletNotFound();
+        }
+        if (amountPaise > FAUCET_MAX_PER_CALL_PAISE) {
+            throw StoreException.faucetLimit("the faucet funds at most "
+                    + FAUCET_MAX_PER_CALL_PAISE + " paise per call; use POST /admin/mint for more");
+        }
+        getWallet(walletId);
+
+        // Serialize faucet calls for this wallet against each other. Without the
+        // lock, two concurrent calls both read the pre-existing total, both find
+        // room under the ceiling, and both apply -- the same check-then-act race
+        // this service refuses to have anywhere else.
+        jdbc.queryForObject("SELECT balance_paise FROM wallets WHERE id = ?::uuid FOR NO KEY UPDATE",
+                Long.class, walletId);
+
+        boolean applied = applyMint(walletId, idempotencyKey, amountPaise);
+
+        // Checked after the insert, so a replay of an already-applied key is
+        // answered from the existing row and never re-tested against the ceiling.
+        // Throwing here rolls the whole transaction back, mint row included.
+        if (applied) {
+            Long lifetime = jdbc.queryForObject(
+                    "SELECT coalesce(sum(amount_paise), 0) FROM mints WHERE wallet_id = ?::uuid",
+                    Long.class, walletId);
+            if (lifetime != null && lifetime > FAUCET_MAX_PER_WALLET_PAISE) {
+                throw StoreException.faucetLimit("this wallet has reached its lifetime funding "
+                        + "ceiling of " + FAUCET_MAX_PER_WALLET_PAISE + " paise");
+            }
+        }
+        return new MintResult(getWallet(walletId), applied);
+    }
+
+    /**
+     * The shared write behind both funding paths: one idempotent row in
+     * {@code mints}, and the credit only when that row is genuinely new.
+     *
+     * @return true when this call applied the money, false when the key was a replay
+     */
+    private boolean applyMint(String walletId, String idempotencyKey, long amountPaise) {
         int inserted = jdbc.update("""
                 INSERT INTO mints (idempotency_key, wallet_id, amount_paise)
                 VALUES (?, ?::uuid, ?)
@@ -134,7 +206,7 @@ public class WalletRepository {
                      WHERE id = ?::uuid
                     """, amountPaise, walletId);
         }
-        return new MintResult(getWallet(walletId), inserted == 1);
+        return inserted == 1;
     }
 
     public record MintResult(Wallet wallet, boolean applied) {}

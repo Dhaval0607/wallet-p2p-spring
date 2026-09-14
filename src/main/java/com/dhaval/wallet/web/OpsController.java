@@ -98,7 +98,8 @@ public class OpsController {
         endpoints.put("GET /wallets/{id}", "current balance");
         endpoints.put("POST /transfers", "move money; body: from, to, amount_paise, idempotency_key");
         endpoints.put("GET /transfers/{id}", "transfer status");
-        endpoints.put("POST /admin/mint", "test funding (admin bearer token); NOT a transfer");
+        endpoints.put("POST /wallets/{id}/fund", "public faucet: fund your own wallet, no admin token; NOT a transfer");
+        endpoints.put("POST /admin/mint", "unbounded test funding (admin bearer token); NOT a transfer");
         endpoints.put("GET /invariants", "live invariant audit, recomputed from base tables");
         endpoints.put("GET /metrics", "prometheus metrics");
         endpoints.put("GET /dashboard", "live metrics dashboard");

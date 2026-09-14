@@ -48,6 +48,7 @@ public class ApiExceptionHandler {
             case WALLET_NOT_FOUND -> ErrorBody.of(404, "wallet_not_found", "no wallet with that id");
             case TRANSFER_NOT_FOUND -> ErrorBody.of(404, "transfer_not_found", "no transfer with that id");
             case SAME_WALLET -> ErrorBody.of(422, "same_wallet", "from and to must be different wallets");
+            case FAUCET_LIMIT -> ErrorBody.of(429, "faucet_limit", e.getMessage());
             case IDEMPOTENCY_CONFLICT -> {
                 metrics.idempotencyConflict();
                 log.atWarn()

@@ -13,6 +13,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
 /** Wallet endpoints. */
@@ -72,5 +73,62 @@ public class WalletController {
     public WalletView getWallet(@PathVariable String id, HttpServletRequest request) {
         auth.require(request);
         return WalletView.of(wallets.getWallet(id));
+    }
+
+    /** The faucet request body. Integer paise, and idempotent like everything else here. */
+    public record FundBody(
+            @JsonProperty("amount_paise") Long amountPaise,
+            @JsonProperty("idempotency_key") String idempotencyKey) {}
+
+    /**
+     * Self-service test funding for the caller's own wallet. No admin token.
+     *
+     * <p>This is what lets anyone reproduce the invariant gates against the
+     * deployed URL without a secret being passed around out of band. It is
+     * bounded per call and per wallet, and it is deliberately <b>not</b> a
+     * transfer: the money lands in {@code mints}, which is what keeps
+     * conservation a checkable equation rather than an assertion.
+     */
+    @PostMapping("/wallets/{id}/fund")
+    public ResponseEntity<WalletView> fund(@PathVariable String id,
+                                           @RequestBody FundBody body,
+                                           HttpServletRequest request) {
+        User user = auth.require(request);
+
+        if (body.amountPaise() == null || body.amountPaise() <= 0) {
+            throw new ApiException(422, "invalid_amount",
+                    "amount_paise is required and must be a positive integer");
+        }
+        if (body.idempotencyKey() == null || body.idempotencyKey().isBlank()) {
+            throw new ApiException(422, "missing_idempotency_key",
+                    "idempotency_key is required so a retried funding step cannot double the float");
+        }
+
+        Wallet target = wallets.getWallet(id);
+        if (!target.userId().equals(user.id())) {
+            throw new ApiException(403, "not_wallet_owner",
+                    "the faucet only funds a wallet your own bearer token owns");
+        }
+
+        WalletRepository.MintResult result =
+                wallets.fund(id, body.idempotencyKey(), body.amountPaise());
+
+        if (result.applied()) {
+            metrics.minted(body.amountPaise());
+        }
+
+        log.atInfo()
+                .addKeyValue("event", "faucet_fund")
+                .addKeyValue("wallet_id", result.wallet().id())
+                .addKeyValue("amount_paise", body.amountPaise())
+                .addKeyValue("applied", result.applied())
+                .addKeyValue("balance_paise", result.wallet().balancePaise())
+                .log("faucet fund");
+
+        ResponseEntity.BodyBuilder response = ResponseEntity.ok();
+        if (!result.applied()) {
+            response.header("Idempotent-Replay", "true");
+        }
+        return response.body(WalletView.of(result.wallet()));
     }
 }
