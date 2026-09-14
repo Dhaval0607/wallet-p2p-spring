@@ -1,10 +1,88 @@
 # Wallet & P2P Transfer — design write-up
 
-Java 21 · Spring Boot 3.5 · Postgres 16. One page on what this is, why it is
-built the way it is, and what I gave up.
+Java 21 · Spring Boot 3.5 · Postgres 16.
 
 **Live:** https://wallet-p2p-spring.onrender.com | **Logs:** https://wallet-p2p-spring.onrender.com/logs | **Invariants:** https://wallet-p2p-spring.onrender.com/invariants
 **Repo:** https://github.com/Dhaval0607/wallet-p2p-spring
+
+---
+
+# The one page
+
+**Data model.** Five tables. Money is `bigint` paise in Postgres and `long` paise
+in Java — no float, no `BigDecimal` on the money path, and `"amount_paise": 12.5`
+is rejected by the deserializer, not rounded. `users` (SHA-256 of the token),
+`wallets` (`UNIQUE (user_id)` makes get-or-create race-free, `CHECK (balance_paise
+>= 0)` backstops overdraft), `transfers` — which **is** the idempotency table, not
+a second one — `ledger_entries` (double-entry, `SUM` always 0), and `mints` for
+money entering from outside. Mints are deliberately not transfers: routed through
+the transfer path, conservation would be unfalsifiable, since the total could
+change and I could always call it a deposit. Apart, it is a checkable equation —
+`SUM(balances) == SUM(mints)` — which `GET /invariants` recomputes from the base
+tables on every call, answering **500** if it fails.
+
+**The simplest-correct mechanism.** One `READ COMMITTED` transaction covers the
+key, the debit, the credit and the ledger rows. Claim the idempotency key first
+with `INSERT … ON CONFLICT DO NOTHING` (the unique index is the lock), then lock
+both wallets `FOR NO KEY UPDATE` in **ascending wallet-id order**, then decide
+while holding both. A decline happens before any money write, so nothing partial
+exists to undo.
+
+Sorted ordering alone is **not** sufficient. I built this design in Go first with
+`FOR UPDATE` and correct ordering; a 400-transfer burst produced **428 deadlocks
+and 133 HTTP 500s**. `INSERT INTO transfers` takes `FOR KEY SHARE` on both wallets
+for its foreign keys — before the sorted section, in an order the constraint
+checker picks — and `FOR UPDATE` conflicts with it, so the cycle forms before my
+ordering begins and no application ordering can break it. The fix is the *correct*
+lock strength, not the strongest: `balance_paise` is not a key column, so
+`FOR NO KEY UPDATE` excludes every writer without touching the FK locks. Zero
+deadlocks, zero 500s, at 1500 transfers with 100 in flight.
+**Rejected:** `SERIALIZABLE` (trades a deadlock storm for a retry storm, against
+anomalies this transaction cannot have); conditional `UPDATE` with no locks (safe,
+but makes "no partial apply" a property of my rollback code rather than of never
+having written); JPA `@Lock(PESSIMISTIC_WRITE)` (silently maps to the `FOR UPDATE`
+that deadlocks here); application mutexes (wrong layer — breaks on replica two).
+
+**Where idempotency lives.** On `UNIQUE (requester_user_id, idempotency_key)` in
+`transfers`, inserted **in the same transaction as the debit and credit**. Check
+the key in a separate transaction and a window opens between "no row with this key"
+and "money moved" where a concurrent retry sees no row and moves money too —
+exactly what a 30-way storm finds. Committed together, a duplicate either blocks on
+the index and reads the committed result, or loses the race and reads the same.
+Same key, different body is a **409**, compared on a fingerprint of the request's
+*meaning* (`SHA-256("v1|from|to|amount")`), so reformatted JSON is a retry rather
+than a spurious conflict. Validation runs before the key is claimed, so a typo
+never burns a key the client cannot then reuse.
+
+**Consistency vs availability.** Consistency, deliberately. Single Postgres
+primary, synchronous linearizable writes; if the database is unreachable
+`POST /transfers` fails rather than queuing or optimistically accepting. I gave up
+availability — single point of failure, writes do not scale past one primary. Right
+trade for money: "your transfer failed, retry" is recoverable and the idempotency
+key makes that retry exactly-once, while "both succeeded and the money existed
+once" is not.
+
+**AI: directed vs decided.** I directed the correctness design — one transaction
+spanning key and money, `transfers` as the idempotency table, lock ordering,
+redundant debit layers, mints kept out of the transfer path, and the rejections
+above. AI decided, and I accepted: `ON CONFLICT DO NOTHING` over catching `23505`,
+the `xmax = 0` trick, the Micrometer boundaries, the libpq→JDBC translation.
+Accepting cost me twice — `FOR UPDATE` with correct ordering, argued convincingly
+and deadlocking 428 times, and `SpringApplicationBuilder.properties()`, which
+registers *default* properties below `application.yml` and failed silently at
+boot. Both were caught by running it, not reading it. That is the honest reason
+`scripts/burst.sh` exists and why CI asserts `wallet_db_retries_total == 0`.
+
+**Cost: ₹0.** Render free web + free Postgres, no card; GitHub Actions free for
+public repos. No other services.
+
+---
+
+*Everything below is the detail behind that page — the full data model, the
+deadlock in depth, the rejected-alternatives table, and a schema-isolation bug
+that passed every health check while reading another service's rows. The page
+above is the submission; the rest is the reasoning, which is what the exercise
+says it is grading.*
 
 ---
 
