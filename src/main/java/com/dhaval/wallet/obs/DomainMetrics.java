@@ -120,6 +120,34 @@ public class DomainMetrics {
                 .increment();
     }
 
+    /**
+     * Carries the counters that survive in Postgres across a process restart up
+     * to their durable value. Called once at startup, before the app serves
+     * anything, so nothing is double-counted: every later increment is a genuinely
+     * new event on top of this floor.
+     *
+     * <p>A counter that steps up at startup rather than resetting to zero is
+     * deliberate. The usual Prometheus contract is the opposite -- a reset is the
+     * signal a scraper uses to detect a restart -- but nothing scrapes this
+     * instance on a free tier; the counters are read straight off {@code /metrics}
+     * by a human. Matching the ledger is worth more here than preserving a
+     * rate() calculation nobody is running.
+     */
+    public void seedFromLedger(long walletCount, long succeededCount, long declinedCount,
+                               long transferredTotal, long mintedTotal) {
+        increment(walletsCreated, walletCount);
+        increment(succeeded, succeededCount);
+        increment(insufficient, declinedCount);
+        increment(transferredPaise, transferredTotal);
+        increment(mintedPaise, mintedTotal);
+    }
+
+    private static void increment(Counter counter, long amount) {
+        if (amount > 0) {
+            counter.increment(amount);
+        }
+    }
+
     public void recordInvariants(long totalBalance, long ledgerSum) {
         totalBalancePaise.set(totalBalance);
         ledgerSumPaise.set(ledgerSum);

@@ -139,6 +139,41 @@ public class WalletRepository {
 
     public record MintResult(Wallet wallet, boolean applied) {}
 
+    /**
+     * The durable totals behind the domain counters, read once at startup.
+     *
+     * <p>Micrometer counters live in process memory, so a restart -- and a free
+     * instance sleeps after ~15 minutes idle -- resets them to zero while the
+     * ledger they describe still holds thousands of transfers. That reads as
+     * broken instrumentation: {@code /metrics} says 0 succeeded next to an
+     * {@code /invariants} reporting 1291. Seeding from the base tables makes the
+     * counters lifetime totals of the money, not of the current process.
+     *
+     * <p>Only the outcomes that leave a row are recoverable. Replays, conflicts
+     * and rejects are answered without writing anything, by design -- that is what
+     * makes them cheap -- so they have no durable count and stay process-local.
+     */
+    public CounterBaseline counterBaseline() {
+        return jdbc.queryForObject("""
+                SELECT
+                  (SELECT count(*) FROM wallets)                                             AS wallets,
+                  (SELECT count(*) FROM transfers WHERE status = 'succeeded')                AS succeeded,
+                  (SELECT count(*) FROM transfers WHERE status = 'declined')                 AS declined,
+                  (SELECT coalesce(sum(amount_paise), 0) FROM transfers
+                    WHERE status = 'succeeded')                                              AS transferred_paise,
+                  (SELECT coalesce(sum(amount_paise), 0) FROM mints)                         AS minted_paise
+                """, (rs, n) -> new CounterBaseline(
+                        rs.getLong("wallets"),
+                        rs.getLong("succeeded"),
+                        rs.getLong("declined"),
+                        rs.getLong("transferred_paise"),
+                        rs.getLong("minted_paise")));
+    }
+
+    /** Durable counter totals recovered from the base tables at startup. */
+    public record CounterBaseline(long wallets, long succeeded, long declined,
+                                  long transferredPaise, long mintedPaise) {}
+
     /** Live audit of every property this service claims, recomputed from base tables. */
     public Invariants checkInvariants() {
         return jdbc.queryForObject("""

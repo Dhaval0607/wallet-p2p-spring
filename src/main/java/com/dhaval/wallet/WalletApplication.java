@@ -55,6 +55,40 @@ public class WalletApplication {
     }
 
     /**
+     * Recovers the domain counters from Postgres before the first request lands.
+     *
+     * <p>Without this, a restart -- which on a free instance happens every time it
+     * sleeps -- leaves {@code /metrics} reporting zero transfers beside an
+     * {@code /invariants} reporting thousands. Same service, same second, two
+     * numbers that cannot both be right.
+     */
+    @Bean
+    org.springframework.boot.CommandLineRunner seedDomainCounters(WalletRepository wallets,
+                                                                 DomainMetrics metrics) {
+        Logger log = LoggerFactory.getLogger(WalletApplication.class);
+        return args -> {
+            try {
+                WalletRepository.CounterBaseline base = wallets.counterBaseline();
+                metrics.seedFromLedger(base.wallets(), base.succeeded(), base.declined(),
+                        base.transferredPaise(), base.mintedPaise());
+                log.atInfo()
+                        .addKeyValue("event", "counters_seeded")
+                        .addKeyValue("wallets", base.wallets())
+                        .addKeyValue("transfers_succeeded", base.succeeded())
+                        .addKeyValue("transfers_declined", base.declined())
+                        .addKeyValue("transferred_paise", base.transferredPaise())
+                        .addKeyValue("minted_paise", base.mintedPaise())
+                        .log("domain counters recovered from the ledger");
+            } catch (RuntimeException e) {
+                // Metrics are observability, not correctness. Start anyway and
+                // count from zero rather than refuse to serve money.
+                log.atWarn().addKeyValue("event", "counter_seed_failed")
+                        .log("could not seed domain counters: {}", e.getMessage());
+            }
+        };
+    }
+
+    /**
      * Keeps the conservation gauges fresh even when nobody is polling
      * /invariants, so a break shows up on the dashboard and in the logs rather
      * than only when someone thinks to look.
