@@ -85,17 +85,48 @@ printf "%s  run id      %s%s\n" "$D" "$RUN_ID" "$N"
 # --------------------------------------------------------------------------
 head_ "Reachability"
 # --------------------------------------------------------------------------
-if ! curl -fsS --max-time 30 "$BASE_URL/healthz" > "$WORK/health" 2>"$WORK/health.err"; then
-  fail "cannot reach $BASE_URL/healthz -- $(cat "$WORK/health.err")"
+# A free instance sleeps after ~15 minutes idle and a JVM takes ~40-60s to wake,
+# so the first request is not a failure -- it is a cold start. Wait for it rather
+# than reporting the platform's sleep schedule as a broken service. WAKE_TIMEOUT
+# is the total budget; each attempt gets a short timeout of its own so a hung
+# connection cannot consume the whole thing.
+WAKE_TIMEOUT="${WAKE_TIMEOUT:-180}"
+WAKE_START="$(date +%s)"
+WOKE=0
+while [ $(( $(date +%s) - WAKE_START )) -lt "$WAKE_TIMEOUT" ]; do
+  if curl -fsS --max-time 20 "$BASE_URL/healthz" > "$WORK/health" 2>"$WORK/health.err"; then
+    WOKE=1
+    break
+  fi
+  if [ "$(( $(date +%s) - WAKE_START ))" -ge 10 ]; then
+    info "still waking (${BASE_URL} cold start, $(( $(date +%s) - WAKE_START ))s elapsed)..."
+  fi
+  sleep 3
+done
+
+if [ "$WOKE" != "1" ]; then
+  fail "cannot reach $BASE_URL/healthz after ${WAKE_TIMEOUT}s -- $(cat "$WORK/health.err")"
   exit 1
 fi
+WAKE_SECS=$(( $(date +%s) - WAKE_START ))
 pass "healthz: $(cat "$WORK/health")"
+[ "$WAKE_SECS" -gt 5 ] && info "cold start: took ${WAKE_SECS}s to wake"
 
-READY="$(curl -sS --max-time 30 "$BASE_URL/readyz")"
-case "$READY" in
-  *'"ready"'*) pass "readyz: database reachable" ;;
-  *) fail "readyz: $READY"; exit 1 ;;
-esac
+# Readiness can lag liveness: the process answers /healthz as soon as the HTTP
+# connector is up, while the database connection behind /readyz may still be
+# establishing on a host that sleeps the database too.
+READY_START="$(date +%s)"
+while :; do
+  READY="$(curl -sS --max-time 20 "$BASE_URL/readyz")"
+  case "$READY" in
+    *'"ready"'*) pass "readyz: database reachable"; break ;;
+  esac
+  if [ $(( $(date +%s) - READY_START )) -ge 60 ]; then
+    fail "readyz never became ready: $READY"
+    exit 1
+  fi
+  sleep 3
+done
 
 BEFORE="$(curl -sS "$BASE_URL/invariants")"
 START_TOTAL="$(printf '%s' "$BEFORE" | jget total_balance_paise)"
@@ -142,8 +173,26 @@ while [ "$i" -le "$N_WALLETS" ]; do
   TOK="usr_${RUN_ID}_w${i}"
   WID="$(api POST /wallets "$TOK" | jget id)"
   if [ -z "$WID" ]; then fail "could not create wallet $i"; exit 1; fi
-  api POST /admin/mint "$ADMIN_TOKEN" \
-      "{\"wallet_id\":\"$WID\",\"amount_paise\":$SEED_PAISE,\"idempotency_key\":\"$RUN_ID-seed-$i\"}" > /dev/null
+
+  # Check the mint actually landed. A wrong or missing ADMIN_TOKEN answers 403,
+  # and swallowing that leaves every wallet at zero -- at which point every
+  # transfer below is declined for insufficient funds and the gates "pass"
+  # without ever moving money. A vacuous pass is worse than a failure, so this
+  # stops here and says exactly what is wrong.
+  MINT="$(api POST /admin/mint "$ADMIN_TOKEN" \
+      "{\"wallet_id\":\"$WID\",\"amount_paise\":$SEED_PAISE,\"idempotency_key\":\"$RUN_ID-seed-$i\"}")"
+  MINTED="$(printf '%s' "$MINT" | jget balance_paise)"
+  if [ -z "$MINTED" ] || [ "$MINTED" = "0" ]; then
+    fail "could not fund wallet $i -- the server said: $MINT"
+    case "$MINT" in
+      *forbidden*|*admin*)
+        info "POST /admin/mint is gated by ADMIN_TOKEN, and the value in use is"
+        info "'$ADMIN_TOKEN'. Against the deployed instance that token ships with"
+        info "the submission; export it and re-run:"
+        info "    ADMIN_TOKEN=<token> $0 $BASE_URL" ;;
+    esac
+    exit 1
+  fi
   echo "$WID" >> "$WORK/wallets"
   echo "$TOK" >> "$WORK/tokens"
   i=$((i+1))
