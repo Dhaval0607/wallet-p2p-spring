@@ -37,9 +37,10 @@ dashboard need no auth, and `make up && make burst` reproduces all three gates
 locally with no token at all.
 
 > The free instance sleeps after ~15 minutes idle and takes ~40-60s to wake (a
-> JVM cold start is slower than a native binary's). The burst script waits on
-> `/healthz` before it starts timing anything, so a cold start shows up as a slow
-> first request rather than a failure.
+> JVM cold start is slower than a native binary's). The burst script polls
+> `/healthz` for up to 180s (`WAKE_TIMEOUT`) and then `/readyz` for up to 60s
+> before it starts timing anything, reporting the wake as `cold start: took Ns`.
+> So a sleeping instance shows up as a slow start, not a failure.
 
 **Design write-up:** [WRITEUP.md](WRITEUP.md) — data model, the deadlock that
 sorted lock ordering does *not* fix, where idempotency lives,
@@ -115,6 +116,20 @@ into the filter box at `/logs` and watch only your own burst stream past.
 Auth is a bearer token per user: `Authorization: Bearer <token>`. The token **is**
 the identity — first use provisions the user. Auth sophistication is explicitly
 not what this exercise is about.
+
+**One token owns exactly one wallet.** `POST /wallets` takes no body: it returns
+the caller's wallet, creating it on first call, and `wallets.user_id` is `UNIQUE`,
+so the same token can never produce a second one — that is what makes the
+concurrent get-or-create gate hold. To have two parties to a transfer, use two
+tokens:
+
+```bash
+A=$(curl -sX POST "$URL/wallets" -H 'Authorization: Bearer alice' | jq -r .id)
+B=$(curl -sX POST "$URL/wallets" -H 'Authorization: Bearer bob'   | jq -r .id)
+```
+
+Only the owner of the **source** wallet may move money out of it, so a transfer
+from `$A` is sent with alice's token. Anything else is `403`.
 
 | method | path | notes |
 |---|---|---|
